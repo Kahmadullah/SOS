@@ -16,6 +16,11 @@ public class SosFrame extends JFrame {
   private final JLabel statusLabel = new JLabel("Status: In progress");
   private final JButton newGameButton = new JButton("New Game");
 
+  // player type selectors + simple AI
+  private final JComboBox<PlayerType> playerATypeBox = new JComboBox<>(PlayerType.values());
+  private final JComboBox<PlayerType> playerBTypeBox = new JComboBox<>(PlayerType.values());
+  private Strategy aiStrategy = new RandomStrategy();  // simple AI
+
   private JPanel boardPanel;
   private JButton[][] cellButtons;
 
@@ -52,17 +57,27 @@ public class SosFrame extends JFrame {
     gc.gridx = 2; p.add(new JLabel("Mode:"), gc);
     gc.gridx = 3; p.add(modeBox, gc);
 
-    gc.gridx = 4; p.add(new JLabel("Letter:"), gc);
-    gc.gridx = 5; p.add(sButton, gc);
-    gc.gridx = 6; p.add(oButton, gc);
+    // Player type selectors after Mode
+    gc.gridx = 4; p.add(new JLabel("A Type:"), gc);
+    gc.gridx = 5;
+    playerATypeBox.setSelectedItem(PlayerType.HUMAN);
+    p.add(playerATypeBox, gc);
 
-    gc.gridx = 7; p.add(currentPlayerLabel, gc);
+    gc.gridx = 6; p.add(new JLabel("B Type:"), gc);
+    gc.gridx = 7;
+    playerBTypeBox.setSelectedItem(PlayerType.COMPUTER);
+    p.add(playerBTypeBox, gc);
 
-    gc.gridx = 8; p.add(scoreLabel, gc);
+    // Shift existing controls to the right (indices updated)
+    gc.gridx = 8; p.add(new JLabel("Letter:"), gc);
+    gc.gridx = 9; p.add(sButton, gc);
+    gc.gridx = 10; p.add(oButton, gc);
 
-    gc.gridx = 9; p.add(statusLabel, gc);
+    gc.gridx = 11; p.add(currentPlayerLabel, gc);
+    gc.gridx = 12; p.add(scoreLabel, gc);
+    gc.gridx = 13; p.add(statusLabel, gc);
 
-    gc.gridx = 10;
+    gc.gridx = 14;
     newGameButton.addActionListener(this::onNewGame);
     p.add(newGameButton, gc);
 
@@ -72,6 +87,7 @@ public class SosFrame extends JFrame {
   private void onNewGame(ActionEvent e) {
     startNewGame();
     rebuildBoardUI();
+    maybeStartAiTurn(); // if AI starts, let it move immediately
   }
 
   private void startNewGame() {
@@ -79,6 +95,7 @@ public class SosFrame extends JFrame {
     GameMode mode = (GameMode) modeBox.getSelectedItem();
     game = SosGames.create(size, mode);
     updateLabels();
+    setBoardEnabled(true); // enable grid for a fresh game
   }
 
   private void rebuildBoardUI() {
@@ -107,6 +124,12 @@ public class SosFrame extends JFrame {
   private void onCellClicked(int row, int col) {
     if (game.getStatus() != SosGameBase.Status.IN_PROGRESS) return;
 
+    // If it's a computer's turn, ignore human clicks
+    boolean aTurn = game.isPlayerATurn();
+    PlayerType current = aTurn ? (PlayerType) playerATypeBox.getSelectedItem()
+                               : (PlayerType) playerBTypeBox.getSelectedItem();
+    if (current == PlayerType.COMPUTER) return;
+
     SosGameBase.Cell letter = sButton.isSelected() ? SosGameBase.Cell.S : SosGameBase.Cell.O;
     try {
       if (!game.isCellEmpty(row, col)) {
@@ -114,14 +137,16 @@ public class SosFrame extends JFrame {
             JOptionPane.WARNING_MESSAGE);
         return;
       }
+      boolean wasPlayerA = game.isPlayerATurn();       // whose move is this?
       game.placeLetter(row, col, letter);
-      cellButtons[row][col].setText(letter == SosGameBase.Cell.S ? "S" : "O");
-      cellButtons[row][col].setEnabled(false);
+      setCellText(row, col, letter, wasPlayerA);       // colorize (A=blue, B=red)
 
       updateLabels();
       if (game.getStatus() != SosGameBase.Status.IN_PROGRESS) {
         disableRemainingCells();
         announceResult();
+      } else {
+        maybeStartAiTurn(); // after human move, let AI respond
       }
     } catch (RuntimeException ex) {
       JOptionPane.showMessageDialog(this, ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
@@ -146,6 +171,79 @@ public class SosFrame extends JFrame {
         if (cellButtons[r][c].isEnabled()) cellButtons[r][c].setEnabled(false);
       }
     }
+  }
+
+  // enable/disable only empty cells (used around AI turns)
+  private void setBoardEnabled(boolean enabled) {
+    if (cellButtons == null) return; // prevent NPE before board exists
+    int n = game.getSize();
+    for (int r = 0; r < n; r++) {
+      for (int c = 0; c < n; c++) {
+        if (cellButtons[r][c].getText().isEmpty()) {
+          cellButtons[r][c].setEnabled(enabled);
+        }
+      }
+    }
+  }
+
+  // helper: set text + color by player (A=blue, B=red), stays colored even when disabled
+  private void setCellText(int row, int col, SosGameBase.Cell letter, boolean isPlayerA) {
+    JButton b = cellButtons[row][col];
+    String ch = (letter == SosGameBase.Cell.S) ? "S" : "O";
+    String colorHex = isPlayerA ? "#1565c0" : "#d32f2f";
+    b.setText("<html><b><span style='color:" + colorHex + ";'>" + ch + "</span></b></html>");
+    b.setForeground(isPlayerA ? new Color(21,101,192) : new Color(211,47,47));
+    b.setEnabled(true);
+  }
+
+  // drive AI turns (handles extra turns in GENERAL automatically)
+  private void maybeStartAiTurn() {
+    if (game.getStatus() != SosGameBase.Status.IN_PROGRESS) return;
+
+    boolean aTurn = game.isPlayerATurn();
+    PlayerType current = aTurn ? (PlayerType) playerATypeBox.getSelectedItem()
+                               : (PlayerType) playerBTypeBox.getSelectedItem();
+    if (current != PlayerType.COMPUTER) {
+      setBoardEnabled(true); // human's turn
+      return;
+    }
+
+    setBoardEnabled(false); // lock UI while AI thinks/plays
+    new SwingWorker<Move, Void>() {
+      @Override protected Move doInBackground() {
+        return aiStrategy.choose(game);
+      }
+      @Override protected void done() {
+        try {
+          Move m = get();
+          if (m != null && game.getStatus() == SosGameBase.Status.IN_PROGRESS) {
+            game.placeLetter(m.row(), m.col(), m.letter());
+            setCellText(m.row(), m.col(), m.letter(), aTurn); // color by mover
+          }
+          updateLabels();
+
+          if (game.getStatus() != SosGameBase.Status.IN_PROGRESS) {
+            disableRemainingCells();
+            announceResult();
+            return;
+          }
+
+          PlayerType nextType = game.isPlayerATurn()
+              ? (PlayerType) playerATypeBox.getSelectedItem()
+              : (PlayerType) playerBTypeBox.getSelectedItem();
+
+          if (nextType == PlayerType.COMPUTER) {
+            // Continue AI chain (extra turn in GENERAL or other side is AI)
+            maybeStartAiTurn();
+          } else {
+            setBoardEnabled(true); // back to human
+          }
+        } catch (Exception ex) {
+          JOptionPane.showMessageDialog(SosFrame.this, ex.getMessage(), "AI Error", JOptionPane.ERROR_MESSAGE);
+          setBoardEnabled(true);
+        }
+      }
+    }.execute();
   }
 
   private void announceResult() {

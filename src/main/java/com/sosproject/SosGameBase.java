@@ -1,13 +1,5 @@
 package com.sosproject;
 
-/**
- * Base class for SOS modes.
- * Adds:
- *  - Status tracking (in progress / win / draw)
- *  - Scoring (used by General mode)
- *  - SOS detection around the last move
- *  - Turn handling with a hook to allow extra turns (General)
- */
 public abstract class SosGameBase {
   public enum Cell { EMPTY, S, O }
   public enum Status { IN_PROGRESS, PLAYER_A_WON, PLAYER_B_WON, DRAW }
