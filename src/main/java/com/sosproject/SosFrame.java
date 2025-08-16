@@ -3,6 +3,9 @@ package com.sosproject;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.List;
 
 public class SosFrame extends JFrame {
   private SosGameBase game;
@@ -16,10 +19,16 @@ public class SosFrame extends JFrame {
   private final JLabel statusLabel = new JLabel("Status: In progress");
   private final JButton newGameButton = new JButton("New Game");
 
-  // player type selectors + simple AI
   private final JComboBox<PlayerType> playerATypeBox = new JComboBox<>(PlayerType.values());
   private final JComboBox<PlayerType> playerBTypeBox = new JComboBox<>(PlayerType.values());
-  private Strategy aiStrategy = new RandomStrategy();  // simple AI
+  private Strategy aiStrategy = new RandomStrategy();
+
+  private final JCheckBox recordCheck = new JCheckBox("Record game");
+  private final JButton replayButton = new JButton("Replay");
+
+  private TextGameRecorder recorder;
+  private boolean isReplaying = false;
+  private int moveIndex = 0;
 
   private JPanel boardPanel;
   private JButton[][] cellButtons;
@@ -27,7 +36,7 @@ public class SosFrame extends JFrame {
   public SosFrame() {
     super("SOS");
     setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-    setMinimumSize(new Dimension(650, 520));
+    setMinimumSize(new Dimension(760, 560));
 
     for (int i = 3; i <= 10; i++) boardSizeBox.addItem(i);
     boardSizeBox.setSelectedItem(5);
@@ -57,7 +66,6 @@ public class SosFrame extends JFrame {
     gc.gridx = 2; p.add(new JLabel("Mode:"), gc);
     gc.gridx = 3; p.add(modeBox, gc);
 
-    // Player type selectors after Mode
     gc.gridx = 4; p.add(new JLabel("A Type:"), gc);
     gc.gridx = 5;
     playerATypeBox.setSelectedItem(PlayerType.HUMAN);
@@ -68,7 +76,6 @@ public class SosFrame extends JFrame {
     playerBTypeBox.setSelectedItem(PlayerType.COMPUTER);
     p.add(playerBTypeBox, gc);
 
-    // Shift existing controls to the right (indices updated)
     gc.gridx = 8; p.add(new JLabel("Letter:"), gc);
     gc.gridx = 9; p.add(sButton, gc);
     gc.gridx = 10; p.add(oButton, gc);
@@ -77,7 +84,12 @@ public class SosFrame extends JFrame {
     gc.gridx = 12; p.add(scoreLabel, gc);
     gc.gridx = 13; p.add(statusLabel, gc);
 
-    gc.gridx = 14;
+    gc.gridx = 14; p.add(recordCheck, gc);
+    gc.gridx = 15;
+    replayButton.addActionListener(this::onReplay);
+    p.add(replayButton, gc);
+
+    gc.gridx = 16;
     newGameButton.addActionListener(this::onNewGame);
     p.add(newGameButton, gc);
 
@@ -87,15 +99,37 @@ public class SosFrame extends JFrame {
   private void onNewGame(ActionEvent e) {
     startNewGame();
     rebuildBoardUI();
-    maybeStartAiTurn(); // if AI starts, let it move immediately
+    maybeStartAiTurn();
   }
 
   private void startNewGame() {
+    closeRecorderQuietly();
+    isReplaying = false;
+    moveIndex = 0;
+
     int size = (Integer) boardSizeBox.getSelectedItem();
     GameMode mode = (GameMode) modeBox.getSelectedItem();
     game = SosGames.create(size, mode);
     updateLabels();
-    setBoardEnabled(true); // enable grid for a fresh game
+    setBoardEnabled(true);
+
+    if (recordCheck.isSelected()) {
+      JFileChooser fc = new JFileChooser();
+      fc.setDialogTitle("Save recording");
+      if (fc.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+        try {
+          Path p = fc.getSelectedFile().toPath();
+          recorder = new TextGameRecorder(p);
+          recorder.start(game, (PlayerType) playerATypeBox.getSelectedItem(), (PlayerType) playerBTypeBox.getSelectedItem());
+        } catch (IOException ex) {
+          JOptionPane.showMessageDialog(this, "Failed to start recording: " + ex.getMessage(), "I/O Error", JOptionPane.ERROR_MESSAGE);
+          recorder = null;
+          recordCheck.setSelected(false);
+        }
+      } else {
+        recordCheck.setSelected(false);
+      }
+    }
   }
 
   private void rebuildBoardUI() {
@@ -122,9 +156,9 @@ public class SosFrame extends JFrame {
   }
 
   private void onCellClicked(int row, int col) {
+    if (isReplaying) return;
     if (game.getStatus() != SosGameBase.Status.IN_PROGRESS) return;
 
-    // If it's a computer's turn, ignore human clicks
     boolean aTurn = game.isPlayerATurn();
     PlayerType current = aTurn ? (PlayerType) playerATypeBox.getSelectedItem()
                                : (PlayerType) playerBTypeBox.getSelectedItem();
@@ -133,20 +167,23 @@ public class SosFrame extends JFrame {
     SosGameBase.Cell letter = sButton.isSelected() ? SosGameBase.Cell.S : SosGameBase.Cell.O;
     try {
       if (!game.isCellEmpty(row, col)) {
-        JOptionPane.showMessageDialog(this, "That cell is already taken.", "Invalid Move",
-            JOptionPane.WARNING_MESSAGE);
+        JOptionPane.showMessageDialog(this, "That cell is already taken.", "Invalid Move", JOptionPane.WARNING_MESSAGE);
         return;
       }
-      boolean wasPlayerA = game.isPlayerATurn();       // whose move is this?
+      boolean wasPlayerA = game.isPlayerATurn();
       game.placeLetter(row, col, letter);
-      setCellText(row, col, letter, wasPlayerA);       // colorize (A=blue, B=red)
+      setCellText(row, col, letter, wasPlayerA);
+
+      if (recorder != null) {
+        try { recorder.recordMove(++moveIndex, wasPlayerA, row, col, letter, game); } catch (IOException ignored) {}
+      }
 
       updateLabels();
       if (game.getStatus() != SosGameBase.Status.IN_PROGRESS) {
         disableRemainingCells();
         announceResult();
       } else {
-        maybeStartAiTurn(); // after human move, let AI respond
+        maybeStartAiTurn();
       }
     } catch (RuntimeException ex) {
       JOptionPane.showMessageDialog(this, ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
@@ -173,9 +210,8 @@ public class SosFrame extends JFrame {
     }
   }
 
-  // enable/disable only empty cells (used around AI turns)
   private void setBoardEnabled(boolean enabled) {
-    if (cellButtons == null) return; // prevent NPE before board exists
+    if (cellButtons == null) return;
     int n = game.getSize();
     for (int r = 0; r < n; r++) {
       for (int c = 0; c < n; c++) {
@@ -186,7 +222,6 @@ public class SosFrame extends JFrame {
     }
   }
 
-  // helper: set text + color by player (A=blue, B=red), stays colored even when disabled
   private void setCellText(int row, int col, SosGameBase.Cell letter, boolean isPlayerA) {
     JButton b = cellButtons[row][col];
     String ch = (letter == SosGameBase.Cell.S) ? "S" : "O";
@@ -196,19 +231,19 @@ public class SosFrame extends JFrame {
     b.setEnabled(true);
   }
 
-  // drive AI turns (handles extra turns in GENERAL automatically)
   private void maybeStartAiTurn() {
+    if (isReplaying) return;
     if (game.getStatus() != SosGameBase.Status.IN_PROGRESS) return;
 
     boolean aTurn = game.isPlayerATurn();
     PlayerType current = aTurn ? (PlayerType) playerATypeBox.getSelectedItem()
                                : (PlayerType) playerBTypeBox.getSelectedItem();
     if (current != PlayerType.COMPUTER) {
-      setBoardEnabled(true); // human's turn
+      setBoardEnabled(true);
       return;
     }
 
-    setBoardEnabled(false); // lock UI while AI thinks/plays
+    setBoardEnabled(false);
     new SwingWorker<Move, Void>() {
       @Override protected Move doInBackground() {
         return aiStrategy.choose(game);
@@ -218,7 +253,10 @@ public class SosFrame extends JFrame {
           Move m = get();
           if (m != null && game.getStatus() == SosGameBase.Status.IN_PROGRESS) {
             game.placeLetter(m.row(), m.col(), m.letter());
-            setCellText(m.row(), m.col(), m.letter(), aTurn); // color by mover
+            setCellText(m.row(), m.col(), m.letter(), aTurn);
+            if (recorder != null) {
+              try { recorder.recordMove(++moveIndex, aTurn, m.row(), m.col(), m.letter(), game); } catch (IOException ignored) {}
+            }
           }
           updateLabels();
 
@@ -233,10 +271,9 @@ public class SosFrame extends JFrame {
               : (PlayerType) playerBTypeBox.getSelectedItem();
 
           if (nextType == PlayerType.COMPUTER) {
-            // Continue AI chain (extra turn in GENERAL or other side is AI)
             maybeStartAiTurn();
           } else {
-            setBoardEnabled(true); // back to human
+            setBoardEnabled(true);
           }
         } catch (Exception ex) {
           JOptionPane.showMessageDialog(SosFrame.this, ex.getMessage(), "AI Error", JOptionPane.ERROR_MESSAGE);
@@ -244,6 +281,54 @@ public class SosFrame extends JFrame {
         }
       }
     }.execute();
+  }
+
+  private void onReplay(ActionEvent e) {
+    JFileChooser fc = new JFileChooser();
+    fc.setDialogTitle("Open recording");
+    if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+
+    Path p = fc.getSelectedFile().toPath();
+    GameReplayer.Loaded loaded;
+    try {
+      loaded = GameReplayer.load(p);
+    } catch (IOException ex) {
+      JOptionPane.showMessageDialog(this, "Failed to load recording: " + ex.getMessage(), "I/O Error", JOptionPane.ERROR_MESSAGE);
+      return;
+    }
+
+    isReplaying = true;
+    recordCheck.setSelected(false);
+    closeRecorderQuietly();
+
+    game = SosGames.create(loaded.size, loaded.mode);
+    updateLabels();
+    rebuildBoardUI();
+    setBoardEnabled(false);
+
+    List<GameReplayer.MoveRec> moves = loaded.moves;
+    final int[] idx = {0};
+    Timer t = new Timer(450, ae -> {
+      if (idx[0] >= moves.size() || game.getStatus() != SosGameBase.Status.IN_PROGRESS) {
+        ((Timer) ae.getSource()).stop();
+        isReplaying = false;
+        disableRemainingCells();
+        announceResult();
+        return;
+      }
+      GameReplayer.MoveRec mr = moves.get(idx[0]++);
+      try {
+        game.placeLetter(mr.row, mr.col, mr.letter);
+        setCellText(mr.row, mr.col, mr.letter, mr.isPlayerA);
+        updateLabels();
+      } catch (RuntimeException ex) {
+        ((Timer) ae.getSource()).stop();
+        isReplaying = false;
+        JOptionPane.showMessageDialog(this, "Replay failed: " + ex.getMessage(), "Replay Error", JOptionPane.ERROR_MESSAGE);
+      }
+    });
+    t.setInitialDelay(400);
+    t.start();
   }
 
   private void announceResult() {
@@ -254,5 +339,16 @@ public class SosFrame extends JFrame {
       default -> "Game over.";
     };
     JOptionPane.showMessageDialog(this, msg, "Game Over", JOptionPane.INFORMATION_MESSAGE);
+    if (recorder != null) {
+      try { recorder.finish(game); } catch (IOException ignored) {}
+      recorder = null;
+    }
+  }
+
+  private void closeRecorderQuietly() {
+    if (recorder != null) {
+      try { recorder.close(); } catch (IOException ignored) {}
+      recorder = null;
+    }
   }
 }
